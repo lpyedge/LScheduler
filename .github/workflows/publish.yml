@@ -1,0 +1,143 @@
+name: Publish NuGet Packages
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      preview:
+        description: Publish preview packages with a version suffix.
+        required: false
+        type: boolean
+        default: true
+      version_suffix:
+        description: Preview version suffix.
+        required: false
+        type: string
+        default: preview
+      publish_lscheduler:
+        description: Publish the LScheduler package.
+        required: false
+        type: boolean
+        default: true
+      publish_sqlite:
+        description: Publish the LScheduler.Sqlite package.
+        required: false
+        type: boolean
+        default: true
+      publish_mysql:
+        description: Publish the LScheduler.MySql package.
+        required: false
+        type: boolean
+        default: true
+      publish_sqlserver:
+        description: Publish the LScheduler.SqlServer package.
+        required: false
+        type: boolean
+        default: true
+      publish_redis:
+        description: Publish the LScheduler.Redis package.
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+          include-prerelease: true
+
+      - name: Determine version suffix
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]] && [[ "${{ github.event.inputs.preview }}" == "true" ]]; then
+            echo "VERSION_SUFFIX=${{ github.event.inputs.version_suffix }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Determine package selection
+        run: |
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            echo "PUBLISH_LSCHEDULER=true" >> "$GITHUB_ENV"
+            echo "PUBLISH_SQLITE=true" >> "$GITHUB_ENV"
+            echo "PUBLISH_MYSQL=true" >> "$GITHUB_ENV"
+            echo "PUBLISH_SQLSERVER=true" >> "$GITHUB_ENV"
+            echo "PUBLISH_REDIS=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          echo "PUBLISH_LSCHEDULER=${{ github.event.inputs.publish_lscheduler }}" >> "$GITHUB_ENV"
+          echo "PUBLISH_SQLITE=${{ github.event.inputs.publish_sqlite }}" >> "$GITHUB_ENV"
+          echo "PUBLISH_MYSQL=${{ github.event.inputs.publish_mysql }}" >> "$GITHUB_ENV"
+          echo "PUBLISH_SQLSERVER=${{ github.event.inputs.publish_sqlserver }}" >> "$GITHUB_ENV"
+          echo "PUBLISH_REDIS=${{ github.event.inputs.publish_redis }}" >> "$GITHUB_ENV"
+
+      - name: Restore
+        run: dotnet restore LScheduler.sln
+
+      - name: Build
+        run: dotnet build LScheduler.sln --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test tests/LScheduler.Tests/LScheduler.Tests.csproj --configuration Release --no-build
+
+      - name: Pack
+        run: |
+          mkdir -p artifacts
+
+          projects=()
+
+          if [[ "${PUBLISH_LSCHEDULER}" == "true" ]]; then
+            projects+=("src/LScheduler/LScheduler.csproj")
+          fi
+
+          if [[ "${PUBLISH_SQLITE}" == "true" ]]; then
+            projects+=("src/LScheduler.Sqlite/LScheduler.Sqlite.csproj")
+          fi
+
+          if [[ "${PUBLISH_MYSQL}" == "true" ]]; then
+            projects+=("src/LScheduler.MySql/LScheduler.MySql.csproj")
+          fi
+
+          if [[ "${PUBLISH_SQLSERVER}" == "true" ]]; then
+            projects+=("src/LScheduler.SqlServer/LScheduler.SqlServer.csproj")
+          fi
+
+          if [[ "${PUBLISH_REDIS}" == "true" ]]; then
+            projects+=("src/LScheduler.Redis/LScheduler.Redis.csproj")
+          fi
+
+          if [[ ${#projects[@]} -eq 0 ]]; then
+            echo "No packages were selected for publishing."
+            exit 1
+          fi
+
+          for project in "${projects[@]}"; do
+            if [[ -n "${VERSION_SUFFIX:-}" ]]; then
+              version=$(dotnet msbuild "$project" -getProperty:Version | tail -n 1)
+              dotnet pack "$project" \
+                --configuration Release \
+                --no-build \
+                --output ./artifacts \
+                -p:PackageVersion="${version}-${VERSION_SUFFIX}"
+            else
+              dotnet pack "$project" \
+                --configuration Release \
+                --no-build \
+                --output ./artifacts
+            fi
+          done
+
+      - name: Push to NuGet
+        run: dotnet nuget push ./artifacts/*.nupkg --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-packages
+          path: ./artifacts/*.nupkg

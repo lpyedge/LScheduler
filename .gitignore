@@ -1,0 +1,22 @@
+# .NET build output
+**/bin/
+**/obj/
+
+# Test output
+**/TestResults/
+
+# Local packaging output
+artifacts/
+*.nupkg
+*.snupkg
+
+# IDE / user-specific files
+.vs/
+.idea/
+*.suo
+*.user
+*.rsuser
+
+# OS files
+.DS_Store
+.ai/
