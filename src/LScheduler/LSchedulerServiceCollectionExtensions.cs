@@ -2,58 +2,25 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
 
 namespace LScheduler;
 
 public static class LSchedulerServiceCollectionExtensions
 {
+    /// <summary>
+    /// Registers the scheduler. Options start from defaults and are overridden by the
+    /// <c>LScheduler</c> section of the application <see cref="IConfiguration"/> when one exists.
+    /// </summary>
     public static IServiceCollection AddLScheduler(this IServiceCollection services)
     {
-        return services.AddLScheduler(_ => { });
-    }
-
-    public static IServiceCollection AddLScheduler(
-        this IServiceCollection services,
-        IConfiguration configuration)
-    {
         Guard.NotNull(services, nameof(services));
-        Guard.NotNull(configuration, nameof(configuration));
 
-        var options = configuration.GetSection(JobSchedulerOptions.SectionName).Get<JobSchedulerOptions>() ?? new JobSchedulerOptions();
-        return services.AddLScheduler(options);
-    }
-
-    public static IServiceCollection AddLScheduler(
-        this IServiceCollection services,
-        IConfigurationSection configurationSection)
-    {
-        Guard.NotNull(services, nameof(services));
-        Guard.NotNull(configurationSection, nameof(configurationSection));
-
-        var options = configurationSection.Get<JobSchedulerOptions>() ?? new JobSchedulerOptions();
-        return services.AddLScheduler(options);
-    }
-
-    public static IServiceCollection AddLScheduler(
-        this IServiceCollection services,
-        Action<JobSchedulerOptions> configure)
-    {
-        Guard.NotNull(services, nameof(services));
-        Guard.NotNull(configure, nameof(configure));
-
-        var options = new JobSchedulerOptions();
-        configure(options);
-        return services.AddLScheduler(options);
-    }
-
-    private static IServiceCollection AddLScheduler(
-        this IServiceCollection services,
-        JobSchedulerOptions options)
-    {
-        Guard.NotNull(services, nameof(services));
-        Guard.NotNull(options, nameof(options));
-
-        services.TryAddSingleton(options);
+        services.AddOptions();
+        services.TryAddEnumerable(
+            ServiceDescriptor.Singleton<IConfigureOptions<JobSchedulerOptions>, ConfigureJobSchedulerOptions>());
+        services.TryAddSingleton(serviceProvider =>
+            serviceProvider.GetRequiredService<IOptions<JobSchedulerOptions>>().Value);
         services.TryAddSingleton<IJobStore>(serviceProvider =>
         {
             var schedulerOptions = serviceProvider.GetRequiredService<JobSchedulerOptions>();
@@ -63,10 +30,46 @@ public static class LSchedulerServiceCollectionExtensions
         {
             var schedulerOptions = serviceProvider.GetRequiredService<JobSchedulerOptions>();
             var store = serviceProvider.GetRequiredService<IJobStore>();
-            return new JobScheduler(store, schedulerOptions.ScanInterval, schedulerOptions.RetryPolicy, serviceProvider);
+            return new JobScheduler(
+                store,
+                schedulerOptions.ScanInterval,
+                schedulerOptions.RetryPolicy,
+                serviceProvider,
+                schedulerOptions.ExecutionLog);
         });
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IHostedService, LSchedulerHostedService>());
 
         return services;
+    }
+
+    public static IServiceCollection AddLScheduler(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        Guard.NotNull(configuration, nameof(configuration));
+
+        return services.AddLScheduler(configuration.GetSection(JobSchedulerOptions.SectionName));
+    }
+
+    public static IServiceCollection AddLScheduler(
+        this IServiceCollection services,
+        IConfigurationSection configurationSection)
+    {
+        Guard.NotNull(configurationSection, nameof(configurationSection));
+
+        return services
+            .AddLScheduler()
+            .Configure<JobSchedulerOptions>(options => configurationSection.Bind(options));
+    }
+
+    public static IServiceCollection AddLScheduler(
+        this IServiceCollection services,
+        Action<JobSchedulerOptions> configure)
+    {
+        Guard.NotNull(configure, nameof(configure));
+
+        return services
+            .AddLScheduler()
+            .Configure(configure);
     }
 }

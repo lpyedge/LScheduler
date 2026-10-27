@@ -235,7 +235,7 @@ public sealed class JobSchedulerTests
     {
         var store = new FakeJobStore();
         var executed = false;
-        var scheduler = new JobScheduler(store);
+        var scheduler = new JobScheduler(store, executionLog: TestExecutionLog.All);
         var dueTime = new DateTime(2026, 03, 23, 10, 00, 00, DateTimeKind.Utc);
 
         await scheduler.AddJobAsync(new JobDefinition
@@ -268,7 +268,7 @@ public sealed class JobSchedulerTests
     {
         var store = new FakeJobStore();
         var executed = false;
-        var scheduler = new JobScheduler(store);
+        var scheduler = new JobScheduler(store, executionLog: TestExecutionLog.All);
         var dueTime = new DateTime(2026, 03, 23, 10, 00, 00, DateTimeKind.Utc);
 
         await scheduler.AddJobAsync(new JobDefinition
@@ -300,7 +300,7 @@ public sealed class JobSchedulerTests
     {
         var store = new FakeJobStore();
         var attempts = 0;
-        var scheduler = new JobScheduler(store);
+        var scheduler = new JobScheduler(store, executionLog: TestExecutionLog.All);
 
         await scheduler.AddJobAsync(new JobDefinition
         {
@@ -344,7 +344,7 @@ public sealed class JobSchedulerTests
     {
         var store = new FakeJobStore();
         var completionSource = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        await using var scheduler = new JobScheduler(store, TimeSpan.FromMilliseconds(20));
+        await using var scheduler = new JobScheduler(store, TimeSpan.FromMilliseconds(20), executionLog: TestExecutionLog.All);
 
         await scheduler.AddJobAsync(new JobDefinition
         {
@@ -373,7 +373,7 @@ public sealed class JobSchedulerTests
     {
         var store = new FakeJobStore();
         var completionSource = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        await using var scheduler = new JobScheduler(store, TimeSpan.FromMilliseconds(20));
+        await using var scheduler = new JobScheduler(store, TimeSpan.FromMilliseconds(20), executionLog: TestExecutionLog.All);
 
         await scheduler.AddJobAsync(new JobDefinition
         {
@@ -407,7 +407,7 @@ public sealed class JobSchedulerTests
     {
         var store = new FakeJobStore();
         var completionSource = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        await using var scheduler = new JobScheduler(store, TimeSpan.FromMilliseconds(20));
+        await using var scheduler = new JobScheduler(store, TimeSpan.FromMilliseconds(20), executionLog: TestExecutionLog.All);
         using var cancellationTokenSource = new CancellationTokenSource();
 
         await scheduler.AddJobAsync(new JobDefinition
@@ -507,7 +507,7 @@ public sealed class JobSchedulerTests
         CancelablePersistentJobs.Reset();
         var store = new FakeJobStore();
 
-        await using (var scheduler = new JobScheduler(store, TimeSpan.FromMilliseconds(20)))
+        await using (var scheduler = new JobScheduler(store, TimeSpan.FromMilliseconds(20), executionLog: TestExecutionLog.All))
         {
             await scheduler.AddJobAsync(
                 "cancelled-job",
@@ -529,7 +529,7 @@ public sealed class JobSchedulerTests
 
         CancelablePersistentJobs.AllowCompletion();
 
-        await using (var restoredScheduler = new JobScheduler(store, TimeSpan.FromMilliseconds(20)))
+        await using (var restoredScheduler = new JobScheduler(store, TimeSpan.FromMilliseconds(20), executionLog: TestExecutionLog.All))
         {
             await restoredScheduler.StartAsync();
             await CancelablePersistentJobs.CompletionSource.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -596,7 +596,7 @@ public sealed class JobSchedulerTests
             },
         });
 
-        await using var scheduler = new JobScheduler(store, TimeSpan.FromMilliseconds(20));
+        await using var scheduler = new JobScheduler(store, TimeSpan.FromMilliseconds(20), executionLog: TestExecutionLog.All);
         await scheduler.StartAsync();
         await ValueTypePayloadJobs.CompletionSource.Task.WaitAsync(TimeSpan.FromSeconds(5));
         await scheduler.StopAsync();

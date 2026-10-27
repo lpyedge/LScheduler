@@ -84,15 +84,7 @@ public readonly struct JobSchedule
 
     public static JobSchedule DailyAt(int hour, int minute)
     {
-        if (hour is < 0 or > 23)
-        {
-            throw new ArgumentOutOfRangeException(nameof(hour), "Hour must be between 0 and 23.");
-        }
-
-        if (minute is < 0 or > 59)
-        {
-            throw new ArgumentOutOfRangeException(nameof(minute), "Minute must be between 0 and 59.");
-        }
+        ValidateTime(hour, minute);
 
         return new JobSchedule($"0 {minute} {hour} * * *");
     }

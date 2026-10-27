@@ -7,7 +7,7 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);1591</NoWarn>
     <PackageId>LScheduler</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <Authors>LScheduler Contributors</Authors>
     <Description>Lightweight embedded task scheduler with Cron support, file persistence, retries, and optional storage providers.</Description>
     <PackageReadmeFile>README.md</PackageReadmeFile>

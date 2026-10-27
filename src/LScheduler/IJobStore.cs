@@ -9,4 +9,6 @@ public interface IJobStore
     Task DeleteJobAsync(string jobId, CancellationToken cancellationToken = default);
 
     Task SaveExecutionResultAsync(JobExecutionResult result, CancellationToken cancellationToken = default);
+
+    Task PurgeExecutionResultsAsync(DateTime olderThanUtc, CancellationToken cancellationToken = default);
 }

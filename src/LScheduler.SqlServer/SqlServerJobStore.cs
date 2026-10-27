@@ -151,6 +151,19 @@ public sealed class SqlServerJobStore : IJobStore
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    public async Task PurgeExecutionResultsAsync(DateTime olderThanUtc, CancellationToken cancellationToken = default)
+    {
+        await EnsureCreatedAsync(cancellationToken);
+
+        using var connection = new SqlConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM dbo.ExecutionLog WHERE EndTimeUtc < @olderThanUtc;";
+        command.Parameters.AddWithValue("@olderThanUtc", olderThanUtc);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     private async Task EnsureCreatedAsync(CancellationToken cancellationToken)
     {
         if (_initialized)

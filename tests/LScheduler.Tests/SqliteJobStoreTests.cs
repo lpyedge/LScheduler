@@ -102,6 +102,24 @@ public sealed class SqliteJobStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task PurgeExecutionResultsAsync_RemovesOnlyOlderEntries()
+    {
+        var store = new SqliteJobStore(_databasePath);
+        var cutoff = new DateTime(2026, 03, 23, 10, 00, 00, DateTimeKind.Utc);
+
+        await store.SaveExecutionResultAsync(new JobExecutionResult { JobId = "old", StartTimeUtc = cutoff, EndTimeUtc = cutoff.AddSeconds(-1) });
+        await store.SaveExecutionResultAsync(new JobExecutionResult { JobId = "new", StartTimeUtc = cutoff, EndTimeUtc = cutoff });
+
+        await store.PurgeExecutionResultsAsync(cutoff);
+
+        using var connection = new SqliteConnection($"Data Source={_databasePath}");
+        await connection.OpenAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT JobId FROM ExecutionLog;";
+        Assert.Equal("new", Assert.IsType<string>(await command.ExecuteScalarAsync()));
+    }
+
+    [Fact]
     public async Task SaveJobAsync_ReplacesExistingJob()
     {
         var store = new SqliteJobStore(_databasePath);

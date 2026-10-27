@@ -3,10 +3,12 @@ namespace LScheduler;
 internal sealed class JobExecutor
 {
     private readonly IJobStore _store;
+    private readonly ExecutionLogOptions _executionLog;
 
-    public JobExecutor(IJobStore store)
+    public JobExecutor(IJobStore store, ExecutionLogOptions? executionLog = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
+        _executionLog = executionLog ?? new ExecutionLogOptions();
     }
 
     public async Task<bool> ExecuteAsync(JobDefinition job, CancellationToken cancellationToken)
@@ -33,9 +35,6 @@ internal sealed class JobExecutor
             {
                 await action(cancellationToken);
                 result.Success = true;
-                result.EndTimeUtc = DateTime.UtcNow;
-                await _store.SaveExecutionResultAsync(result, cancellationToken);
-                return true;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -43,23 +42,38 @@ internal sealed class JobExecutor
             }
             catch (Exception ex)
             {
-                result.Success = false;
                 result.Exception = ex.ToString();
-                result.EndTimeUtc = DateTime.UtcNow;
-                await _store.SaveExecutionResultAsync(result, cancellationToken);
-
-                if (retryCount >= retryPolicy.MaxRetries)
-                {
-                    return true;
-                }
-
-                retryCount++;
-                var delay = GetRetryDelay(retryPolicy, retryCount);
-                await Task.Delay(delay, cancellationToken);
             }
+
+            result.EndTimeUtc = DateTime.UtcNow;
+
+            var willRetry = !result.Success && retryCount < retryPolicy.MaxRetries;
+
+            if (ShouldLog(result.Success, willRetry))
+            {
+                await _store.SaveExecutionResultAsync(result, CancellationToken.None);
+            }
+
+            if (!willRetry)
+            {
+                return true;
+            }
+
+            retryCount++;
+            await Task.Delay(GetRetryDelay(retryPolicy, retryCount), cancellationToken);
         }
 
         return false;
+    }
+
+    private bool ShouldLog(bool success, bool willRetry)
+    {
+        if (success)
+        {
+            return _executionLog.Success;
+        }
+
+        return willRetry ? _executionLog.Retry : _executionLog.Failure;
     }
 
     internal static TimeSpan GetRetryDelay(RetryPolicy retryPolicy, int retryCount)

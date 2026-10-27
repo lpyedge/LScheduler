@@ -9,6 +9,7 @@ public sealed class RedisJobStore : IJobStore, IAsyncDisposable
     private readonly string _jobsKey;
     private readonly string _executionLogKey;
     private readonly string _configuration;
+    private readonly object _connectionLock = new();
     private Task<ConnectionMultiplexer>? _connectionTask;
 
     public RedisJobStore(
@@ -42,24 +43,7 @@ public sealed class RedisJobStore : IJobStore, IAsyncDisposable
         Guard.NotNull(job, nameof(job));
 
         var database = await GetDatabaseAsync();
-        var payload = JsonSerializer.Serialize(new JobDefinition
-        {
-            JobId = job.JobId,
-            Cron = job.Cron,
-            Interval = job.Interval,
-            RunOnce = job.RunOnce,
-            IsPersistent = job.IsPersistent,
-            MethodTypeName = job.MethodTypeName,
-            MethodName = job.MethodName,
-            MethodIsStatic = job.MethodIsStatic,
-            PayloadTypeName = job.PayloadTypeName,
-            PayloadJson = job.PayloadJson,
-            LastRunTimeUtc = job.LastRunTimeUtc,
-            NextRunTimeUtc = job.NextRunTimeUtc,
-            RetryPolicy = job.RetryPolicy,
-        });
-
-        await database.HashSetAsync(_jobsKey, job.JobId, payload);
+        await database.HashSetAsync(_jobsKey, job.JobId, JsonSerializer.Serialize(job));
     }
 
     public async Task DeleteJobAsync(string jobId, CancellationToken cancellationToken = default)
@@ -82,27 +66,97 @@ public sealed class RedisJobStore : IJobStore, IAsyncDisposable
         await database.ListRightPushAsync(_executionLogKey, payload);
     }
 
+    public async Task PurgeExecutionResultsAsync(DateTime olderThanUtc, CancellationToken cancellationToken = default)
+    {
+        const int batchSize = 1000;
+
+        var database = await GetDatabaseAsync();
+
+        while (true)
+        {
+            var batch = await database.ListRangeAsync(_executionLogKey, 0, batchSize - 1);
+            var expiredCount = 0;
+
+            foreach (var entry in batch)
+            {
+                var result = JsonSerializer.Deserialize<JobExecutionResult>(entry.ToString());
+
+                if (result is not null && result.EndTimeUtc >= olderThanUtc)
+                {
+                    break;
+                }
+
+                expiredCount++;
+            }
+
+            if (expiredCount == 0)
+            {
+                return;
+            }
+
+            await database.ListTrimAsync(_executionLogKey, expiredCount, -1);
+
+            if (expiredCount < batch.Length)
+            {
+                return;
+            }
+        }
+    }
+
     public async ValueTask DisposeAsync()
     {
-        if (_connectionTask is null)
+        Task<ConnectionMultiplexer>? connectionTask;
+
+        lock (_connectionLock)
+        {
+            connectionTask = _connectionTask;
+            _connectionTask = null;
+        }
+
+        if (connectionTask is null)
         {
             return;
         }
 
-        if (_connectionTask.Status == TaskStatus.RanToCompletion)
+        ConnectionMultiplexer connection;
+
+        try
         {
-            await _connectionTask.Result.DisposeAsync();
+            connection = await connectionTask;
+        }
+        catch
+        {
             return;
         }
 
-        var connection = await _connectionTask;
         await connection.DisposeAsync();
     }
 
     private async Task<IDatabase> GetDatabaseAsync()
     {
-        _connectionTask ??= ConnectionMultiplexer.ConnectAsync(_configuration);
-        var connection = await _connectionTask;
-        return connection.GetDatabase();
+        Task<ConnectionMultiplexer> connectionTask;
+
+        lock (_connectionLock)
+        {
+            connectionTask = _connectionTask ??= ConnectionMultiplexer.ConnectAsync(_configuration);
+        }
+
+        try
+        {
+            var connection = await connectionTask;
+            return connection.GetDatabase();
+        }
+        catch
+        {
+            lock (_connectionLock)
+            {
+                if (ReferenceEquals(_connectionTask, connectionTask))
+                {
+                    _connectionTask = null;
+                }
+            }
+
+            throw;
+        }
     }
 }

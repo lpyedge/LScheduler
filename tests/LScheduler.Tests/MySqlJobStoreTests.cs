@@ -53,6 +53,29 @@ public sealed class MySqlJobStoreTests : IClassFixture<MySqlDockerFixture>
     }
 
     [Fact]
+    public async Task PurgeExecutionResultsAsync_RemovesOnlyOlderEntries()
+    {
+        var store = new MySqlJobStore(_fixture.ConnectionString);
+        var oldJobId = $"old-{Guid.NewGuid():N}";
+        var newJobId = $"new-{Guid.NewGuid():N}";
+        var cutoff = new DateTime(2026, 03, 23, 10, 00, 00, DateTimeKind.Utc);
+
+        await store.SaveExecutionResultAsync(new JobExecutionResult { JobId = oldJobId, StartTimeUtc = cutoff, EndTimeUtc = cutoff.AddSeconds(-1) });
+        await store.SaveExecutionResultAsync(new JobExecutionResult { JobId = newJobId, StartTimeUtc = cutoff, EndTimeUtc = cutoff });
+
+        await store.PurgeExecutionResultsAsync(cutoff);
+
+        await using var connection = new MySqlConnection(_fixture.ConnectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM ExecutionLog WHERE JobId IN (@oldJobId, @newJobId);";
+        command.Parameters.AddWithValue("@oldJobId", oldJobId);
+        command.Parameters.AddWithValue("@newJobId", newJobId);
+
+        Assert.Equal(1L, Convert.ToInt64(await command.ExecuteScalarAsync()));
+    }
+
+    [Fact]
     public async Task SaveExecutionResultAsync_WritesExecutionLog()
     {
         var store = new MySqlJobStore(_fixture.ConnectionString);

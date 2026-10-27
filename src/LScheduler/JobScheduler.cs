@@ -8,18 +8,23 @@ namespace LScheduler;
 public sealed class JobScheduler : IAsyncDisposable
 {
     private static readonly JsonSerializerOptions PayloadJsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly TimeSpan LogPurgeInterval = TimeSpan.FromHours(1);
 
     private readonly IJobStore _store;
     private readonly JobExecutor _jobExecutor;
     private readonly TimeSpan _scanInterval;
     private readonly RetryPolicy _defaultRetryPolicy;
     private readonly IServiceProvider? _serviceProvider;
+    private readonly ExecutionLogOptions _executionLog;
     private readonly object _jobsLock = new();
     private readonly SemaphoreSlim _initializeLock = new(1, 1);
     private readonly Dictionary<string, JobDefinition> _persistedJobs = new(StringComparer.Ordinal);
     private readonly Dictionary<string, JobDefinition> _jobs = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _runningJobIds = new(StringComparer.Ordinal);
+    private readonly HashSet<Task> _inFlightExecutions = new();
 
-    private bool _initialized;
+    private DateTime _nextLogPurgeUtc = DateTime.MinValue;
+    private volatile bool _initialized;
     private CancellationTokenSource? _loopCts;
     private Task? _loopTask;
 
@@ -27,11 +32,25 @@ public sealed class JobScheduler : IAsyncDisposable
         IJobStore store,
         TimeSpan? scanInterval = null,
         RetryPolicy? retryPolicy = null,
-        IServiceProvider? serviceProvider = null)
+        IServiceProvider? serviceProvider = null,
+        ExecutionLogOptions? executionLog = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
-        _jobExecutor = new JobExecutor(_store);
+        _executionLog = executionLog ?? new ExecutionLogOptions();
+
+        if (_executionLog.Retention < TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(executionLog), "ExecutionLog.Retention must not be negative.");
+        }
+
+        _jobExecutor = new JobExecutor(_store, _executionLog);
         _scanInterval = scanInterval ?? TimeSpan.FromSeconds(1);
+
+        if (_scanInterval <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(scanInterval), "ScanInterval must be greater than zero.");
+        }
+
         _defaultRetryPolicy = retryPolicy?.Clone() ?? new RetryPolicy();
         _serviceProvider = serviceProvider;
     }
@@ -124,6 +143,7 @@ public sealed class JobScheduler : IAsyncDisposable
         await EnsureInitializedAsync(cancellationToken);
 
         JobDefinition merged;
+        JobDefinition? persistedJob;
         var utcNow = DateTime.UtcNow;
 
         lock (_jobsLock)
@@ -133,7 +153,7 @@ public sealed class JobScheduler : IAsyncDisposable
                 throw new InvalidOperationException($"Job '{job.JobId}' is already registered.");
             }
 
-            _persistedJobs.TryGetValue(job.JobId, out var persistedJob);
+            _persistedJobs.TryGetValue(job.JobId, out persistedJob);
             merged = MergeJob(job, persistedJob, utcNow);
             _jobs[merged.JobId] = merged;
 
@@ -143,9 +163,32 @@ public sealed class JobScheduler : IAsyncDisposable
             }
         }
 
-        if (merged.IsPersistent)
+        if (!merged.IsPersistent)
+        {
+            return;
+        }
+
+        try
         {
             await _store.SaveJobAsync(merged, cancellationToken);
+        }
+        catch
+        {
+            lock (_jobsLock)
+            {
+                _jobs.Remove(merged.JobId);
+
+                if (persistedJob is null)
+                {
+                    _persistedJobs.Remove(merged.JobId);
+                }
+                else
+                {
+                    _persistedJobs[merged.JobId] = persistedJob;
+                }
+            }
+
+            throw;
         }
     }
 
@@ -170,6 +213,21 @@ public sealed class JobScheduler : IAsyncDisposable
             return jobs.Values
                 .OrderBy(job => job.JobId, StringComparer.Ordinal)
                 .ToArray();
+        }
+    }
+
+    public async Task<bool> ExistsAsync(string jobId, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(jobId))
+        {
+            throw new ArgumentException("JobId is required.", nameof(jobId));
+        }
+
+        await EnsureInitializedAsync(cancellationToken);
+
+        lock (_jobsLock)
+        {
+            return _jobs.ContainsKey(jobId) || _persistedJobs.ContainsKey(jobId);
         }
     }
 
@@ -213,7 +271,7 @@ public sealed class JobScheduler : IAsyncDisposable
             return;
         }
 
-        _loopCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        _loopCts = new CancellationTokenSource();
         _loopTask = RunLoopAsync(_loopCts.Token);
     }
 
@@ -239,6 +297,15 @@ public sealed class JobScheduler : IAsyncDisposable
             _loopCts.Dispose();
             _loopCts = null;
         }
+
+        Task[] pendingExecutions;
+
+        lock (_jobsLock)
+        {
+            pendingExecutions = _inFlightExecutions.ToArray();
+        }
+
+        await Task.WhenAll(pendingExecutions);
     }
 
     internal IReadOnlyCollection<JobDefinition> GetRegisteredJobs()
@@ -264,7 +331,9 @@ public sealed class JobScheduler : IAsyncDisposable
         lock (_jobsLock)
         {
             dueJobs = _jobs.Values
-                .Where(job => job.NextRunTimeUtc.HasValue && job.NextRunTimeUtc.Value <= utcNow)
+                .Where(job => job.NextRunTimeUtc.HasValue
+                    && job.NextRunTimeUtc.Value <= utcNow
+                    && !_runningJobIds.Contains(job.JobId))
                 .Select(job => job.Clone(includeAction: true))
                 .ToList();
         }
@@ -280,21 +349,20 @@ public sealed class JobScheduler : IAsyncDisposable
         {
             dueJob.LastRunTimeUtc = utcNow;
             var removeAfterRun = dueJob.RunOnce;
+            dueJob.NextRunTimeUtc = removeAfterRun ? null : GetNextRunTimeUtc(dueJob, utcNow);
 
-            if (removeAfterRun)
+            lock (_jobsLock)
             {
-                dueJob.NextRunTimeUtc = null;
+                if (!_jobs.ContainsKey(dueJob.JobId))
+                {
+                    continue;
+                }
 
-                lock (_jobsLock)
+                if (removeAfterRun)
                 {
                     _jobs.Remove(dueJob.JobId);
                 }
-            }
-            else
-            {
-                dueJob.NextRunTimeUtc = GetNextRunTimeUtc(dueJob, utcNow);
-
-                lock (_jobsLock)
+                else
                 {
                     _jobs[dueJob.JobId] = dueJob;
 
@@ -303,11 +371,11 @@ public sealed class JobScheduler : IAsyncDisposable
                         _persistedJobs[dueJob.JobId] = dueJob.Clone(includeAction: false);
                     }
                 }
+            }
 
-                if (dueJob.IsPersistent)
-                {
-                    await _store.SaveJobAsync(dueJob, cancellationToken);
-                }
+            if (!removeAfterRun && dueJob.IsPersistent)
+            {
+                await _store.SaveJobAsync(dueJob, cancellationToken);
             }
 
             var executionTask = ExecuteJobAsync(dueJob, removeAfterRun, cancellationToken);
@@ -318,7 +386,7 @@ public sealed class JobScheduler : IAsyncDisposable
             }
             else
             {
-                _ = ObserveExecutionAsync(executionTask);
+                TrackExecution(ObserveExecutionAsync(executionTask));
             }
         }
 
@@ -338,9 +406,33 @@ public sealed class JobScheduler : IAsyncDisposable
     {
         while (!cancellationToken.IsCancellationRequested)
         {
-            await ProcessDueJobsAsync(DateTime.UtcNow, waitForJobs: false, cancellationToken);
+            try
+            {
+                await ProcessDueJobsAsync(DateTime.UtcNow, waitForJobs: false, cancellationToken);
+                await PurgeExecutionLogAsync(DateTime.UtcNow, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"LScheduler: background scan failed: {ex}");
+            }
+
             await Task.Delay(_scanInterval, cancellationToken);
         }
+    }
+
+    internal async Task PurgeExecutionLogAsync(DateTime utcNow, CancellationToken cancellationToken)
+    {
+        if (_executionLog.Retention <= TimeSpan.Zero || utcNow < _nextLogPurgeUtc)
+        {
+            return;
+        }
+
+        _nextLogPurgeUtc = utcNow + LogPurgeInterval;
+        await _store.PurgeExecutionResultsAsync(utcNow - _executionLog.Retention, cancellationToken);
     }
 
     private async Task EnsureInitializedAsync(CancellationToken cancellationToken)
@@ -385,19 +477,39 @@ public sealed class JobScheduler : IAsyncDisposable
 
     private async Task ExecuteJobAsync(JobDefinition job, bool removeAfterRun, CancellationToken cancellationToken)
     {
-        var completed = await _jobExecutor.ExecuteAsync(job, cancellationToken);
-
-        if (!removeAfterRun || !completed || !job.IsPersistent)
-        {
-            return;
-        }
-
         lock (_jobsLock)
         {
-            _persistedJobs.Remove(job.JobId);
+            _runningJobIds.Add(job.JobId);
         }
 
-        await _store.DeleteJobAsync(job.JobId, cancellationToken);
+        try
+        {
+            var completed = await _jobExecutor.ExecuteAsync(job, cancellationToken);
+
+            if (!removeAfterRun || !completed || !job.IsPersistent)
+            {
+                return;
+            }
+
+            lock (_jobsLock)
+            {
+                if (_jobs.ContainsKey(job.JobId))
+                {
+                    return;
+                }
+
+                _persistedJobs.Remove(job.JobId);
+            }
+
+            await _store.DeleteJobAsync(job.JobId, CancellationToken.None);
+        }
+        finally
+        {
+            lock (_jobsLock)
+            {
+                _runningJobIds.Remove(job.JobId);
+            }
+        }
     }
 
     private JobDefinition MergeJob(JobDefinition job, JobDefinition? persistedJob, DateTime utcNow)
@@ -681,6 +793,15 @@ public sealed class JobScheduler : IAsyncDisposable
         job.RetryPolicy = job.RetryPolicy?.Clone() ?? _defaultRetryPolicy.Clone();
     }
 
+    private void TrackExecution(Task observedExecution)
+    {
+        lock (_jobsLock)
+        {
+            _inFlightExecutions.RemoveWhere(task => task.IsCompleted);
+            _inFlightExecutions.Add(observedExecution);
+        }
+    }
+
     private static async Task ObserveExecutionAsync(Task executionTask)
     {
         try
@@ -689,6 +810,10 @@ public sealed class JobScheduler : IAsyncDisposable
         }
         catch (OperationCanceledException)
         {
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"LScheduler: job execution failed: {ex}");
         }
     }
 

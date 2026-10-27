@@ -7,7 +7,7 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);1591</NoWarn>
     <PackageId>LScheduler.MySql</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <Authors>LScheduler Contributors</Authors>
     <Description>MySQL storage provider for the LScheduler lightweight scheduler.</Description>
     <PackageReadmeFile>README.md</PackageReadmeFile>

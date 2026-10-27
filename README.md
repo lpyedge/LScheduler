@@ -9,6 +9,8 @@ It supports:
 - one-time delay schedules
 - retry policies
 - file persistence by default
+- zero-config startup, automatic `LScheduler` section binding, or code-only configuration
+- execution log with per-outcome switches and automatic retention
 - optional SQLite / MySQL / SQL Server / Redis stores
 - persistent jobs that survive process restarts
 - in-memory jobs for temporary runtime work
@@ -28,10 +30,13 @@ var app = builder.Build();
 
 var scheduler = app.Services.GetRequiredService<JobScheduler>();
 
-await scheduler.AddJobAsync(
-    "heartbeat",
-    JobSchedule.Every(TimeSpan.FromSeconds(30)),
-    DemoJobs.HeartbeatAsync);
+if (!await scheduler.ExistsAsync("heartbeat"))
+{
+    await scheduler.AddJobAsync(
+        "heartbeat",
+        JobSchedule.Every(TimeSpan.FromSeconds(30)),
+        DemoJobs.HeartbeatAsync);
+}
 
 await app.RunAsync();
 
@@ -45,12 +50,18 @@ public static class DemoJobs
 }
 ```
 
+Persistent jobs are restored from the store on restart, and registering an existing `JobId` throws, so check `ExistsAsync(jobId)` first as shown above.
+To change a job, `RemoveJobAsync(jobId)` it and add it again.
+
 What this gives you:
 
 - a singleton `JobScheduler`
 - hosted startup and shutdown
 - file persistence in `AppContext.BaseDirectory/lscheduler-data`
 - persisted schedule metadata, retry policy, next run time, method identity, and optional payload
+- an execution log that records failures and retries by default, with 30-day retention
+
+Settings come from built-in defaults, then the `LScheduler` section of `appsettings.json` (read automatically), then code. See [Configuration](docs/configuration.md).
 
 ## Packages
 
@@ -59,6 +70,8 @@ What this gives you:
 - `LScheduler.MySql`
 - `LScheduler.SqlServer`
 - `LScheduler.Redis`
+
+Each provider package adds one `AddLSchedulerXxx()` registration that reads its connection setting from the `LScheduler:Xxx` configuration section. See [Storage providers](docs/providers.md).
 
 ## Core API
 
@@ -71,6 +84,8 @@ var scheduler = app.Services.GetRequiredService<JobScheduler>();
 Use `AddJobAsync(...)` for persistent jobs.
 
 Use `AddInMemoryJobAsync(...)` for temporary runtime work such as lambdas and closures.
+
+Use `ExistsAsync(jobId)`, `GetJobsAsync()` and `RemoveJobAsync(jobId)` to inspect and manage registered jobs.
 
 `JobSchedule` supports:
 

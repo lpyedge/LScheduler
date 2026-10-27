@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 
 namespace LScheduler;
@@ -8,6 +9,8 @@ public sealed class FileJobStore : IJobStore
     {
         WriteIndented = true,
     };
+
+    private static readonly Encoding Utf8WithoutBom = new UTF8Encoding(false);
 
     private readonly SemaphoreSlim _mutex = new(1, 1);
     private readonly string _jobsFilePath;
@@ -23,7 +26,7 @@ public sealed class FileJobStore : IJobStore
         Directory.CreateDirectory(fullDirectory);
 
         _jobsFilePath = Path.Combine(fullDirectory, "jobs.json");
-        _executionLogFilePath = Path.Combine(fullDirectory, "execution_log.json");
+        _executionLogFilePath = Path.Combine(fullDirectory, "execution_log.jsonl");
     }
 
     public async Task<IReadOnlyCollection<JobDefinition>> LoadJobsAsync(CancellationToken cancellationToken = default)
@@ -98,13 +101,72 @@ public sealed class FileJobStore : IJobStore
 
         try
         {
-            var items = await ReadListAsync<JobExecutionResult>(_executionLogFilePath, cancellationToken);
-            items.Add(result);
-            await WriteListAsync(_executionLogFilePath, items, cancellationToken);
+            using var stream = new FileStream(_executionLogFilePath, FileMode.Append, FileAccess.Write, FileShare.Read);
+            using var writer = new StreamWriter(stream, Utf8WithoutBom);
+            await writer.WriteAsync(JsonSerializer.Serialize(result) + "\n");
         }
         finally
         {
             _mutex.Release();
+        }
+    }
+
+    public async Task PurgeExecutionResultsAsync(DateTime olderThanUtc, CancellationToken cancellationToken = default)
+    {
+        await _mutex.WaitAsync(cancellationToken);
+
+        try
+        {
+            if (!File.Exists(_executionLogFilePath))
+            {
+                return;
+            }
+
+            var keptLines = new List<string>();
+            var hasRemovedLines = false;
+
+            using (var reader = new StreamReader(_executionLogFilePath, Utf8WithoutBom))
+            {
+                string? line;
+
+                while ((line = await reader.ReadLineAsync()) is not null)
+                {
+                    if (IsExpired(line, olderThanUtc))
+                    {
+                        hasRemovedLines = true;
+                    }
+                    else
+                    {
+                        keptLines.Add(line);
+                    }
+                }
+            }
+
+            if (!hasRemovedLines)
+            {
+                return;
+            }
+
+            var tempFilePath = _executionLogFilePath + ".tmp";
+            File.WriteAllText(tempFilePath, keptLines.Count == 0 ? string.Empty : string.Join("\n", keptLines) + "\n", Utf8WithoutBom);
+            ReplaceFile(tempFilePath, _executionLogFilePath);
+        }
+        finally
+        {
+            _mutex.Release();
+        }
+    }
+
+    private static bool IsExpired(string line, DateTime olderThanUtc)
+    {
+        try
+        {
+            var result = JsonSerializer.Deserialize<JobExecutionResult>(line);
+            return result is null || result.EndTimeUtc < olderThanUtc;
+        }
+        catch (JsonException)
+        {
+            return true;
         }
     }
 
@@ -122,7 +184,25 @@ public sealed class FileJobStore : IJobStore
 
     private static async Task WriteListAsync<T>(string filePath, List<T> items, CancellationToken cancellationToken)
     {
-        using var stream = File.Create(filePath);
-        await JsonSerializer.SerializeAsync(stream, items, JsonOptions, cancellationToken);
+        var tempFilePath = filePath + ".tmp";
+
+        using (var stream = File.Create(tempFilePath))
+        {
+            await JsonSerializer.SerializeAsync(stream, items, JsonOptions, cancellationToken);
+        }
+
+        ReplaceFile(tempFilePath, filePath);
+    }
+
+    private static void ReplaceFile(string tempFilePath, string filePath)
+    {
+        if (File.Exists(filePath))
+        {
+            File.Replace(tempFilePath, filePath, null);
+        }
+        else
+        {
+            File.Move(tempFilePath, filePath);
+        }
     }
 }

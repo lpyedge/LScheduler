@@ -44,6 +44,7 @@ public sealed class ServiceRegistrationTests : IDisposable
             options.ScanInterval = TimeSpan.FromMilliseconds(50);
             options.RetryPolicy.MaxRetries = 7;
             options.RetryPolicy.RetryInterval = TimeSpan.FromSeconds(3);
+            options.ExecutionLog.Success = true;
         });
 
         using var host = builder.Build();
@@ -62,7 +63,7 @@ public sealed class ServiceRegistrationTests : IDisposable
         Assert.Equal(7, job.RetryPolicy.MaxRetries);
         Assert.Equal(TimeSpan.FromSeconds(3), job.RetryPolicy.RetryInterval);
         Assert.True(File.Exists(Path.Combine(directory, "jobs.json")));
-        Assert.True(File.Exists(Path.Combine(directory, "execution_log.json")));
+        Assert.True(File.Exists(Path.Combine(directory, "execution_log.jsonl")));
     }
 
     [Fact]
@@ -94,6 +95,70 @@ public sealed class ServiceRegistrationTests : IDisposable
         Assert.Equal(TimeSpan.FromSeconds(2), options.RetryPolicy.RetryInterval);
         Assert.Equal(5, job.RetryPolicy.MaxRetries);
         Assert.Equal(TimeSpan.FromSeconds(2), job.RetryPolicy.RetryInterval);
+    }
+
+    [Fact]
+    public void AddLScheduler_WithoutArguments_ReadsLSchedulerSectionFromHostConfiguration()
+    {
+        var directory = CreateTempDirectory();
+        var builder = Host.CreateApplicationBuilder();
+
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["LScheduler:DataDirectory"] = directory,
+            ["LScheduler:ScanInterval"] = "00:00:00.30",
+            ["LScheduler:ExecutionLog:Success"] = "true",
+            ["LScheduler:ExecutionLog:Retry"] = "false",
+            ["LScheduler:ExecutionLog:Retention"] = "7.00:00:00",
+        });
+
+        builder.Services.AddLScheduler();
+
+        using var host = builder.Build();
+        var options = host.Services.GetRequiredService<JobSchedulerOptions>();
+
+        Assert.Equal(directory, options.DataDirectory);
+        Assert.Equal(TimeSpan.FromMilliseconds(300), options.ScanInterval);
+        Assert.True(options.ExecutionLog.Success);
+        Assert.True(options.ExecutionLog.Failure);
+        Assert.False(options.ExecutionLog.Retry);
+        Assert.Equal(TimeSpan.FromDays(7), options.ExecutionLog.Retention);
+    }
+
+    [Fact]
+    public void AddLScheduler_WithCodeOptions_OverridesLSchedulerSection()
+    {
+        var builder = Host.CreateApplicationBuilder();
+
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["LScheduler:ScanInterval"] = "00:00:00.30",
+            ["LScheduler:RetryPolicy:MaxRetries"] = "9",
+        });
+
+        builder.Services.AddLScheduler(options => options.ScanInterval = TimeSpan.FromMilliseconds(40));
+
+        using var host = builder.Build();
+        var options = host.Services.GetRequiredService<JobSchedulerOptions>();
+
+        Assert.Equal(TimeSpan.FromMilliseconds(40), options.ScanInterval);
+        Assert.Equal(9, options.RetryPolicy.MaxRetries);
+    }
+
+    [Fact]
+    public async Task AddLScheduler_WithoutAnyConfiguration_UsesDefaultExecutionLogOptions()
+    {
+        var services = new ServiceCollection();
+
+        services.AddLScheduler(options => options.ExecutionLog.Failure = false);
+
+        await using var provider = services.BuildServiceProvider();
+        var log = provider.GetRequiredService<JobSchedulerOptions>().ExecutionLog;
+
+        Assert.False(log.Success);
+        Assert.False(log.Failure);
+        Assert.True(log.Retry);
+        Assert.Equal(TimeSpan.FromDays(30), log.Retention);
     }
 
     [Fact]
@@ -147,7 +212,7 @@ public sealed class ServiceRegistrationTests : IDisposable
         await host.StopAsync();
 
         Assert.True(File.Exists(Path.Combine(directory, "jobs.json")));
-        Assert.True(File.Exists(Path.Combine(directory, "execution_log.json")));
+        Assert.False(File.Exists(Path.Combine(directory, "execution_log.jsonl")));
 
         Directory.Delete(directory, recursive: true);
     }
@@ -199,6 +264,72 @@ public sealed class ServiceRegistrationTests : IDisposable
         await secondHost.StopAsync();
 
         Assert.Equal("restored-message", Assert.Single(sink.Messages));
+    }
+
+    [Fact]
+    public async Task ProviderRegistrationWithoutArguments_ReadsProviderSettingFromHostConfiguration()
+    {
+        var directory = CreateTempDirectory();
+        var builder = Host.CreateApplicationBuilder();
+
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["LScheduler:ScanInterval"] = "00:00:00.35",
+            ["LScheduler:Sqlite:DatabasePath"] = Path.Combine(directory, "sqlite.db"),
+            ["LScheduler:MySql:ConnectionString"] = "Server=localhost;Database=lscheduler;User Id=root;Password=test;",
+            ["LScheduler:SqlServer:ConnectionString"] = "Server=.;Database=LScheduler;User Id=sa;Password=Password123!;",
+            ["LScheduler:Redis:Configuration"] = "localhost:6379",
+        });
+
+        var sqliteServices = new ServiceCollection();
+        var mySqlServices = new ServiceCollection();
+        var sqlServerServices = new ServiceCollection();
+        var redisServices = new ServiceCollection();
+
+        foreach (var services in new[] { sqliteServices, mySqlServices, sqlServerServices, redisServices })
+        {
+            services.AddSingleton<IConfiguration>(builder.Configuration);
+        }
+
+        sqliteServices.AddLSchedulerSqlite();
+        mySqlServices.AddLSchedulerMySql();
+        sqlServerServices.AddLSchedulerSqlServer();
+        redisServices.AddLSchedulerRedis();
+
+        await using var sqliteProvider = sqliteServices.BuildServiceProvider();
+        await using var mySqlProvider = mySqlServices.BuildServiceProvider();
+        await using var sqlServerProvider = sqlServerServices.BuildServiceProvider();
+        await using var redisProvider = redisServices.BuildServiceProvider();
+
+        Assert.IsType<SqliteJobStore>(sqliteProvider.GetRequiredService<IJobStore>());
+        Assert.IsType<MySqlJobStore>(mySqlProvider.GetRequiredService<IJobStore>());
+        Assert.IsType<SqlServerJobStore>(sqlServerProvider.GetRequiredService<IJobStore>());
+        Assert.IsType<RedisJobStore>(redisProvider.GetRequiredService<IJobStore>());
+        Assert.Equal(TimeSpan.FromMilliseconds(350), sqliteProvider.GetRequiredService<JobSchedulerOptions>().ScanInterval);
+    }
+
+    [Fact]
+    public async Task ProviderRegistrationWithoutArguments_Throws_WhenProviderSettingIsMissing()
+    {
+        var services = new ServiceCollection();
+        services.AddSingleton<IConfiguration>(new ConfigurationBuilder().Build());
+        services.AddLSchedulerSqlite();
+
+        await using var provider = services.BuildServiceProvider();
+
+        var exception = Assert.Throws<InvalidOperationException>(() => provider.GetRequiredService<IJobStore>());
+        Assert.Contains("LScheduler:Sqlite:DatabasePath", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ProviderRegistrationWithoutArguments_Throws_WhenNoConfigurationIsRegistered()
+    {
+        var services = new ServiceCollection();
+        services.AddLSchedulerRedis();
+
+        await using var provider = services.BuildServiceProvider();
+
+        Assert.Throws<InvalidOperationException>(() => provider.GetRequiredService<IJobStore>());
     }
 
     [Fact]

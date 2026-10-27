@@ -2,7 +2,10 @@
 
 The Worker and ASP.NET Core samples keep runtime registration inside a reusable registrar class.
 
-This avoids scattering `AddJobAsync(...)` calls across startup code and makes duplicate checks explicit.
+This avoids scattering `AddJobAsync(...)` calls across startup code and makes duplicate checks explicit with `ExistsAsync(...)`.
+
+Persistent jobs are restored from the store before the registrar runs, so an existing job is skipped and keeps its saved schedule and `NextRunTimeUtc`.
+To change the schedule or payload of an existing job, remove it and add it again, see [Replacing a Job](jobs-and-schedules.md#replacing-a-job).
 
 ## Example Registrar
 
@@ -20,9 +23,7 @@ public sealed class WorkerJobRegistrar
 
     public async Task RegisterAsync(CancellationToken cancellationToken)
     {
-        var jobs = await _scheduler.GetJobsAsync(cancellationToken);
-
-        if (jobs.All(job => job.JobId != "daily-digest-job"))
+        if (!await _scheduler.ExistsAsync("daily-digest-job", cancellationToken))
         {
             await _scheduler.AddJobAsync(
                 "daily-digest-job",

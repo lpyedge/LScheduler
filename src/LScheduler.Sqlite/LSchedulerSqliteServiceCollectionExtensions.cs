@@ -8,6 +8,28 @@ public static class LSchedulerSqliteServiceCollectionExtensions
 {
     private const string ProviderSectionPath = JobSchedulerOptions.SectionName + ":Sqlite";
 
+    /// <summary>
+    /// Registers the scheduler with a Sqlite store whose setting is read from
+    /// <c>LScheduler:Sqlite:DatabasePath</c> of the application <see cref="IConfiguration"/>.
+    /// </summary>
+    public static IServiceCollection AddLSchedulerSqlite(this IServiceCollection services)
+    {
+        Guard.NotNull(services, nameof(services));
+
+        services.AddSingleton<IJobStore>(serviceProvider =>
+        {
+            var databasePath = serviceProvider.GetService<IConfiguration>()?[$"{ProviderSectionPath}:DatabasePath"];
+
+            if (string.IsNullOrWhiteSpace(databasePath))
+            {
+                throw new InvalidOperationException($"{ProviderSectionPath}:DatabasePath is required.");
+            }
+
+            return new SqliteJobStore(databasePath!);
+        });
+        return services.AddLScheduler();
+    }
+
     public static IServiceCollection AddLSchedulerSqlite(this IServiceCollection services, string databasePath)
     {
         Guard.NotNull(services, nameof(services));

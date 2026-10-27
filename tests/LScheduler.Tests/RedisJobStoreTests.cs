@@ -119,6 +119,28 @@ public sealed class RedisJobStoreTests : IClassFixture<RedisDockerFixture>
     }
 
     [Fact]
+    public async Task PurgeExecutionResultsAsync_TrimsOnlyExpiredEntriesAcrossBatches()
+    {
+        var logsKey = $"lscheduler:logs:{Guid.NewGuid():N}";
+        await using var store = new RedisJobStore(_fixture.Configuration, $"lscheduler:jobs:{Guid.NewGuid():N}", logsKey);
+        await using var connection = await ConnectionMultiplexer.ConnectAsync(_fixture.Configuration);
+        var cutoff = new DateTime(2026, 03, 23, 10, 00, 00, DateTimeKind.Utc);
+
+        for (var i = 0; i < 2500; i++)
+        {
+            await store.SaveExecutionResultAsync(new JobExecutionResult { JobId = $"old-{i}", EndTimeUtc = cutoff.AddSeconds(-1) });
+        }
+
+        await store.SaveExecutionResultAsync(new JobExecutionResult { JobId = "new", EndTimeUtc = cutoff });
+
+        await store.PurgeExecutionResultsAsync(cutoff);
+
+        var database = connection.GetDatabase();
+        Assert.Equal(1L, await database.ListLengthAsync(logsKey));
+        Assert.Contains("\"new\"", (await database.ListGetByIndexAsync(logsKey, 0)).ToString());
+    }
+
+    [Fact]
     public async Task LoadJobsAsync_ReturnsEmpty_WhenNoJobsSaved()
     {
         var jobsKey = $"lscheduler:jobs:{Guid.NewGuid():N}";

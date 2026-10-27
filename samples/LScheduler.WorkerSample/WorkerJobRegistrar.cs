@@ -15,9 +15,7 @@ public sealed class WorkerJobRegistrar
 
     public async Task RegisterAsync(CancellationToken cancellationToken)
     {
-        var jobs = await _scheduler.GetJobsAsync(cancellationToken);
-
-        if (jobs.All(job => job.JobId != "heartbeat-job"))
+        if (!await _scheduler.ExistsAsync("heartbeat-job", cancellationToken))
         {
             await _scheduler.AddInMemoryJobAsync(
                 "heartbeat-job",
@@ -30,7 +28,7 @@ public sealed class WorkerJobRegistrar
                 cancellationToken: cancellationToken);
         }
 
-        if (jobs.All(job => job.JobId != "daily-digest-job"))
+        if (!await _scheduler.ExistsAsync("daily-digest-job", cancellationToken))
         {
             await _scheduler.AddJobAsync(
                 "daily-digest-job",

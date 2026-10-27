@@ -149,6 +149,19 @@ public sealed class SqliteJobStore : IJobStore
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    public async Task PurgeExecutionResultsAsync(DateTime olderThanUtc, CancellationToken cancellationToken = default)
+    {
+        await EnsureCreatedAsync(cancellationToken);
+
+        using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM ExecutionLog WHERE EndTimeUtc < $olderThanUtc;";
+        command.Parameters.AddWithValue("$olderThanUtc", olderThanUtc.ToString("O", CultureInfo.InvariantCulture));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     private async Task EnsureCreatedAsync(CancellationToken cancellationToken)
     {
         if (_initialized)

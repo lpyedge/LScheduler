@@ -15,9 +15,7 @@ public sealed class WebJobRegistrar
 
     public async Task RegisterAsync(CancellationToken cancellationToken = default)
     {
-        var jobs = await _scheduler.GetJobsAsync(cancellationToken);
-
-        if (jobs.All(job => job.JobId != "cache-refresh-job"))
+        if (!await _scheduler.ExistsAsync("cache-refresh-job", cancellationToken))
         {
             await _scheduler.AddJobAsync(
                 "cache-refresh-job",
@@ -27,7 +25,7 @@ public sealed class WebJobRegistrar
                 cancellationToken: cancellationToken);
         }
 
-        if (jobs.All(job => job.JobId != "startup-warmup-job"))
+        if (!await _scheduler.ExistsAsync("startup-warmup-job", cancellationToken))
         {
             await _scheduler.AddInMemoryJobAsync(
                 "startup-warmup-job",

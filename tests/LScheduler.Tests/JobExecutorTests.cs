@@ -8,7 +8,7 @@ public sealed class JobExecutorTests
     public async Task ExecuteAsync_SavesSuccessfulExecution()
     {
         var store = new FakeJobStore();
-        var executor = new JobExecutor(store);
+        var executor = new JobExecutor(store, TestExecutionLog.All);
 
         var completed = await executor.ExecuteAsync(new JobDefinition
         {

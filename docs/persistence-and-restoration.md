@@ -34,13 +34,28 @@ Those should use `AddInMemoryJobAsync(...)`.
 
 ## Restoration Semantics
 
-When a persistent job already exists in the store:
+On start, every persisted job that has method metadata is loaded and becomes active:
 
-- the saved metadata is loaded first
-- `LastRunTimeUtc` is restored
-- `NextRunTimeUtc` is reused when the schedule has not changed
-- `NextRunTimeUtc` is recalculated when the schedule changes
+- the saved schedule, retry policy, and payload are used as stored
+- `LastRunTimeUtc` and `NextRunTimeUtc` are restored
+- a run that came due while the application was down is executed once on start, then the next run is calculated from the current time
 
-One-time persistent jobs are removed from the store after a successful run.
+Because restored jobs are already active, `AddJobAsync(...)` with the same `JobId` throws `InvalidOperationException`.
+Check `ExistsAsync(jobId)` before registering, or remove the job first to replace it.
+A replaced job gets a new `NextRunTimeUtc` calculated from its new schedule.
 
-If a one-time persistent job is cancelled during shutdown before it completes, the persisted job remains in the store and can be restored on the next start.
+One-time persistent jobs are removed from the store when their run completes, either successfully or after the last retry has failed.
+
+If a one-time persistent job is cancelled during shutdown before it completes, the persisted job remains in the store and runs again on the next start.
+
+## Execution Log Storage
+
+Execution results are written to the same store as the jobs, according to the `ExecutionLog` options (see [Configuration](configuration.md#execution-log)):
+
+| Provider | Storage |
+|---|---|
+| File | `execution_log.jsonl`, append-only, one JSON object per line |
+| SQLite / MySQL / SQL Server | `ExecutionLog` table |
+| Redis | list (`lscheduler:execution-log`) |
+
+Results older than `ExecutionLog.Retention` are purged when the scheduler starts and then at most once per hour.

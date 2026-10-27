@@ -8,6 +8,10 @@ internal sealed class FakeJobStore : IJobStore
 
     public List<JobExecutionResult> ExecutionResults { get; } = [];
 
+    public Func<JobDefinition, Task>? OnSaveJob { get; set; }
+
+    public Func<JobExecutionResult, Task>? OnSaveExecutionResult { get; set; }
+
     public Task<IReadOnlyCollection<JobDefinition>> LoadJobsAsync(CancellationToken cancellationToken = default)
     {
         IReadOnlyCollection<JobDefinition> jobs = SavedJobs.Values
@@ -17,10 +21,14 @@ internal sealed class FakeJobStore : IJobStore
         return Task.FromResult(jobs);
     }
 
-    public Task SaveJobAsync(JobDefinition job, CancellationToken cancellationToken = default)
+    public async Task SaveJobAsync(JobDefinition job, CancellationToken cancellationToken = default)
     {
+        if (OnSaveJob is not null)
+        {
+            await OnSaveJob(job);
+        }
+
         SavedJobs[job.JobId] = CloneJob(job);
-        return Task.CompletedTask;
     }
 
     public Task DeleteJobAsync(string jobId, CancellationToken cancellationToken = default)
@@ -29,8 +37,13 @@ internal sealed class FakeJobStore : IJobStore
         return Task.CompletedTask;
     }
 
-    public Task SaveExecutionResultAsync(JobExecutionResult result, CancellationToken cancellationToken = default)
+    public async Task SaveExecutionResultAsync(JobExecutionResult result, CancellationToken cancellationToken = default)
     {
+        if (OnSaveExecutionResult is not null)
+        {
+            await OnSaveExecutionResult(result);
+        }
+
         ExecutionResults.Add(new JobExecutionResult
         {
             JobId = result.JobId,
@@ -40,7 +53,11 @@ internal sealed class FakeJobStore : IJobStore
             Exception = result.Exception,
             RetryCount = result.RetryCount,
         });
+    }
 
+    public Task PurgeExecutionResultsAsync(DateTime olderThanUtc, CancellationToken cancellationToken = default)
+    {
+        ExecutionResults.RemoveAll(result => result.EndTimeUtc < olderThanUtc);
         return Task.CompletedTask;
     }
 

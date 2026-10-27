@@ -10,6 +10,12 @@ It restores, builds, tests, packs, and publishes:
 - `LScheduler.SqlServer`
 - `LScheduler.Redis`
 
+## Before Releasing
+
+- set the same `<Version>` in all five `src/*/*.csproj` files; provider packages depend on the matching `LScheduler` version
+- run the full test suite; the MySQL, SQL Server and Redis store tests need Docker and free host ports 3307, 14333 and 6380
+- the workflow runs the same tests, so a release is not published if they fail
+
 Triggers:
 
 - GitHub release published

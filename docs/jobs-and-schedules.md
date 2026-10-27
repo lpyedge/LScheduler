@@ -100,13 +100,25 @@ JobSchedule.YearlyAt(12, 25, 8, 30);
 
 Notes:
 
-- `Cron(...)` accepts 5-field and 6-field expressions
+- `Cron(...)` accepts 5-field and 6-field expressions (the 6-field form starts with seconds), evaluated in UTC
 - `Every(...)` is recurring
-- `Delay(...)` runs once
+- `Delay(...)` runs once; a persistent one-time job is removed from the store when its run completes
+- the daily / weekly / monthly / yearly builders produce 6-field cron expressions
+
+## Execution Rules
+
+- A job never runs concurrently with itself. If a scan finds a job still running (including its retries), that run is deferred until the previous one finishes.
+- A failed store write does not stop the scan loop; the error is written to `Console.Error` and the next scan continues.
+- `StopAsync` cancels running jobs and waits for them to finish. Jobs should honor the `CancellationToken`.
 
 ## Retry Policy
 
 The global retry policy comes from `JobSchedulerOptions`.
+
+- `MaxRetries` is the number of retries after the first attempt, so a job runs at most `MaxRetries + 1` times per due time.
+- `RetryInterval` is the wait before a retry. With `UseExponentialBackoff` the wait is `RetryInterval * 2^n` for retry number `n`, so the first retry waits twice `RetryInterval`.
+- A job whose last retry fails is not run again until its next scheduled time (a one-time job is removed).
+- Which attempts are written to the execution log is controlled by `ExecutionLog`, see [Configuration](configuration.md#execution-log).
 
 Per-job retry policy overrides the global default:
 
@@ -127,7 +139,25 @@ await scheduler.AddJobAsync(
 
 ```csharp
 var jobs = await scheduler.GetJobsAsync();
+var exists = await scheduler.ExistsAsync("daily-digest");
 var removed = await scheduler.RemoveJobAsync("daily-digest");
 ```
+
+`ExistsAsync(jobId)` covers persistent and in-memory jobs. `RemoveJobAsync(jobId)` returns `false` when the job does not exist; it does not cancel a run that is already in progress.
+
+## Replacing a Job
+
+Registering an existing `JobId` throws. To overwrite, remove it first:
+
+```csharp
+if (await scheduler.ExistsAsync("daily-digest"))
+{
+    await scheduler.RemoveJobAsync("daily-digest");
+}
+
+await scheduler.AddJobAsync("daily-digest", JobSchedule.DailyAt(9, 0), EmailJobs.SendDigestAsync);
+```
+
+A replaced persistent job starts with a new `NextRunTimeUtc` calculated from its new schedule.
 
 `GetJobsAsync()` returns persisted metadata only. `Action` is not exposed.

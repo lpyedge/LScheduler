@@ -56,6 +56,22 @@ public sealed class FileJobStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task SaveJobAsync_ReplacesFileWithoutLeavingTemporaryFiles()
+    {
+        var store = new FileJobStore(_directoryPath);
+
+        await store.SaveJobAsync(new JobDefinition { JobId = "job-1", Interval = TimeSpan.FromSeconds(5) });
+        await store.SaveJobAsync(new JobDefinition { JobId = "job-1", Interval = TimeSpan.FromSeconds(9) });
+        await store.SaveExecutionResultAsync(new JobExecutionResult { JobId = "job-1" });
+
+        var persisted = Assert.Single(await store.LoadJobsAsync());
+        Assert.Equal(TimeSpan.FromSeconds(9), persisted.Interval);
+        Assert.Equal(
+            new[] { "execution_log.jsonl", "jobs.json" },
+            Directory.GetFiles(_directoryPath).Select(Path.GetFileName).OrderBy(name => name, StringComparer.Ordinal));
+    }
+
+    [Fact]
     public async Task SaveExecutionResultAsync_AppendsToExecutionLogFile()
     {
         var store = new FileJobStore(_directoryPath);
@@ -79,14 +95,43 @@ public sealed class FileJobStoreTests : IDisposable
             RetryCount = 2,
         });
 
-        var filePath = Path.Combine(_directoryPath, "execution_log.json");
-        using var stream = File.OpenRead(filePath);
-        var records = await JsonSerializer.DeserializeAsync<List<JobExecutionResult>>(stream);
+        var filePath = Path.Combine(_directoryPath, "execution_log.jsonl");
+        var records = (await File.ReadAllLinesAsync(filePath))
+            .Select(line => JsonSerializer.Deserialize<JobExecutionResult>(line)!)
+            .ToList();
 
-        Assert.NotNull(records);
         Assert.Equal(2, records.Count);
         Assert.Equal("boom", records[0].Exception);
         Assert.True(records[1].Success);
+    }
+
+    [Fact]
+    public async Task PurgeExecutionResultsAsync_RemovesOnlyOlderEntries()
+    {
+        var store = new FileJobStore(_directoryPath);
+        var cutoff = new DateTime(2026, 03, 23, 10, 00, 00, DateTimeKind.Utc);
+
+        await store.SaveExecutionResultAsync(new JobExecutionResult { JobId = "old", EndTimeUtc = cutoff.AddSeconds(-1) });
+        await store.SaveExecutionResultAsync(new JobExecutionResult { JobId = "new", EndTimeUtc = cutoff });
+
+        await store.PurgeExecutionResultsAsync(cutoff);
+
+        var remaining = (await File.ReadAllLinesAsync(Path.Combine(_directoryPath, "execution_log.jsonl")))
+            .Select(line => JsonSerializer.Deserialize<JobExecutionResult>(line)!)
+            .ToList();
+
+        Assert.Equal("new", Assert.Single(remaining).JobId);
+        Assert.Empty(Directory.GetFiles(_directoryPath, "*.tmp"));
+    }
+
+    [Fact]
+    public async Task PurgeExecutionResultsAsync_DoesNothing_WhenLogFileIsMissing()
+    {
+        var store = new FileJobStore(_directoryPath);
+
+        await store.PurgeExecutionResultsAsync(DateTime.UtcNow);
+
+        Assert.False(File.Exists(Path.Combine(_directoryPath, "execution_log.jsonl")));
     }
 
     [Fact]

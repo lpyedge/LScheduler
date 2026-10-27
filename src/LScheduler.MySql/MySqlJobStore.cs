@@ -143,6 +143,19 @@ public sealed class MySqlJobStore : IJobStore
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    public async Task PurgeExecutionResultsAsync(DateTime olderThanUtc, CancellationToken cancellationToken = default)
+    {
+        await EnsureCreatedAsync(cancellationToken);
+
+        await using var connection = new MySqlConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM ExecutionLog WHERE EndTimeUtc < @olderThanUtc;";
+        command.Parameters.AddWithValue("@olderThanUtc", olderThanUtc);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     private async Task EnsureCreatedAsync(CancellationToken cancellationToken)
     {
         if (_initialized)

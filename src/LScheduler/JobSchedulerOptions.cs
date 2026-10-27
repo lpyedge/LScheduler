@@ -9,4 +9,6 @@ public sealed class JobSchedulerOptions
     public TimeSpan ScanInterval { get; set; } = TimeSpan.FromSeconds(1);
 
     public RetryPolicy RetryPolicy { get; set; } = new();
+
+    public ExecutionLogOptions ExecutionLog { get; set; } = new();
 }

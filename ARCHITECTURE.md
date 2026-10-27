@@ -10,8 +10,9 @@ It provides:
 - recurring interval jobs
 - one-time delay jobs
 - retry handling
-- execution result persistence
+- execution result persistence with per-outcome switches and retention
 - durable restart restoration for method-based jobs
+- zero-config startup, `LScheduler` section binding, and code-only configuration
 
 It does not provide:
 
@@ -30,6 +31,7 @@ Main types:
 - `JobScheduler`
 - `JobSchedule`
 - `JobSchedulerOptions`
+- `ExecutionLogOptions`
 - `RetryPolicy`
 - `JobDefinition`
 - `JobExecutionResult`
@@ -37,6 +39,7 @@ Main types:
 - `FileJobStore`
 - `JobExecutor`
 - `CronHelper`
+- `ConfigureJobSchedulerOptions` (internal, binds the `LScheduler` section)
 
 ### `src/LScheduler.Sqlite`
 
@@ -68,15 +71,17 @@ Redis-backed `IJobStore` plus `AddLSchedulerRedis(...)`.
 - scan loop
 - next run calculation
 - persistent job removal
+- waiting for in-flight executions on `StopAsync`
+- purging expired execution results (at start, then at most once per hour)
 
 ### `JobExecutor`
 
 `JobExecutor` owns:
 
 - invoking the job action
-- writing `JobExecutionResult`
 - retry loop
 - retry delay calculation
+- writing the `JobExecutionResult` of attempts selected by `ExecutionLogOptions`, even if shutdown was requested after the attempt finished
 
 ### `IJobStore`
 
@@ -86,6 +91,7 @@ Redis-backed `IJobStore` plus `AddLSchedulerRedis(...)`.
 - saving updated `JobDefinition` records
 - deleting jobs
 - appending execution results
+- purging execution results older than a cutoff
 
 ## Dependency Shape
 
@@ -105,12 +111,20 @@ Core registration:
 - `AddLScheduler(configurationSection)`
 - `AddLScheduler(options => ...)`
 
+Options are resolved in this order, later steps override earlier ones:
+
+1. built-in defaults
+2. the `LScheduler` section of the application `IConfiguration`, bound automatically by every overload when one is registered
+3. the configuration or delegate passed to the overload
+
 Provider registration:
 
 - `AddLSchedulerSqlite(...)`
 - `AddLSchedulerMySql(...)`
 - `AddLSchedulerSqlServer(...)`
 - `AddLSchedulerRedis(...)`
+
+Each provider has a parameterless overload that reads its key from the application `IConfiguration`, an overload taking an `IConfiguration`, and overloads taking the setting directly (optionally with an options delegate or configuration).
 
 All registrations produce the same singleton `JobScheduler`.
 
@@ -150,7 +164,10 @@ In-memory jobs are not saved to `IJobStore` and do not survive restart.
 ### Query and removal
 
 - `JobScheduler.GetJobsAsync()`
+- `JobScheduler.ExistsAsync(jobId)`
 - `JobScheduler.RemoveJobAsync(jobId)`
+
+Registering an existing `JobId` is rejected. A job is replaced by removing it and adding it again.
 
 ## Durable Job Model
 
@@ -189,16 +206,29 @@ Those cases must use `AddInMemoryJobAsync(...)`.
 5. Payload JSON is deserialized when needed.
 6. The rebuilt action is added back into the active in-memory registry.
 
+Restored jobs keep their stored `LastRunTimeUtc` and `NextRunTimeUtc`; a run that came due while the application was down executes once on start.
+
 ## Scheduling Flow
 
 1. Application code resolves `JobScheduler`.
 2. A job is registered through `AddJobAsync(...)` or `AddInMemoryJobAsync(...)`.
 3. Duplicate active `JobId` values are rejected.
 4. Persistent jobs are saved immediately.
-5. The background loop scans registered jobs on `ScanInterval`.
-6. Due jobs are executed through `JobExecutor`.
+5. The background loop scans registered jobs on `ScanInterval`. A failed scan is logged to `Console.Error` and does not stop the loop.
+6. Due jobs are executed through `JobExecutor`. A job that is still running is not started again until it finishes.
+   Jobs removed while a scan is in progress are skipped.
 7. Recurring jobs persist their new `NextRunTimeUtc`.
-8. Successful completion of a one-time persistent job removes it from the store.
+8. A one-time persistent job is removed from the store when its run completes, whether it succeeded or its last retry failed. A run cancelled by shutdown leaves the job in the store.
+
+## Execution Flow
+
+1. `JobExecutor` invokes the job action. An attempt either succeeds or fails.
+2. A failed attempt is retried up to `RetryPolicy.MaxRetries` times, waiting `RetryInterval` (multiplied by `2^n` for retry number `n` with exponential backoff).
+3. Each attempt has one outcome, and `ExecutionLogOptions` decides which outcomes are written through `IJobStore`:
+   - `Success`: the attempt succeeded (default off)
+   - `Retry`: the attempt failed and another attempt follows (default on)
+   - `Failure`: the attempt failed and no retry is left (default on)
+4. `JobScheduler` purges results older than `ExecutionLogOptions.Retention` when it starts and then at most once per hour.
 
 ## Persistence Shape
 
@@ -226,7 +256,10 @@ Persisted `JobDefinition` data includes:
 Files:
 
 - `jobs.json`
-- `execution_log.json`
+- `execution_log.jsonl`
+
+`jobs.json` is written to a `.tmp` file first and then swapped in, so a crash cannot leave a truncated file.
+`execution_log.jsonl` is append-only, one JSON object per line; purging rewrites it the same way.
 
 ### SQLite / MySQL / SQL Server
 
@@ -237,6 +270,8 @@ Jobs table stores:
 - retry policy
 - method metadata
 - payload metadata
+
+Purging deletes rows whose `EndTimeUtc` is older than the cutoff.
 
 Execution log table stores:
 
@@ -250,7 +285,7 @@ Execution log table stores:
 ### Redis
 
 - a hash stores jobs
-- a list stores execution log entries
+- a list stores execution log entries; purging trims expired entries from the head
 
 ## Locked Decisions
 
@@ -260,3 +295,5 @@ Execution log table stores:
 - `IJobStore` is the only persistence abstraction
 - persistent jobs are method-based
 - file persistence is the default path
+- option precedence is defaults, then the `LScheduler` configuration section, then code
+- the execution log records failures and retries by default; success logging is opt-in

@@ -8,6 +8,28 @@ public static class LSchedulerRedisServiceCollectionExtensions
 {
     private const string ProviderSectionPath = JobSchedulerOptions.SectionName + ":Redis";
 
+    /// <summary>
+    /// Registers the scheduler with a Redis store whose setting is read from
+    /// <c>LScheduler:Redis:Configuration</c> of the application <see cref="IConfiguration"/>.
+    /// </summary>
+    public static IServiceCollection AddLSchedulerRedis(this IServiceCollection services)
+    {
+        Guard.NotNull(services, nameof(services));
+
+        services.AddSingleton<IJobStore>(serviceProvider =>
+        {
+            var redisConfiguration = serviceProvider.GetService<IConfiguration>()?[$"{ProviderSectionPath}:Configuration"];
+
+            if (string.IsNullOrWhiteSpace(redisConfiguration))
+            {
+                throw new InvalidOperationException($"{ProviderSectionPath}:Configuration is required.");
+            }
+
+            return new RedisJobStore(redisConfiguration!);
+        });
+        return services.AddLScheduler();
+    }
+
     public static IServiceCollection AddLSchedulerRedis(this IServiceCollection services, string configuration)
     {
         Guard.NotNull(services, nameof(services));
